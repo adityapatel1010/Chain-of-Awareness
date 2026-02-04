@@ -23,8 +23,8 @@ MODEL_NAME = 'all-MiniLM-L6-v2'
 FIFO_SIZE = 10
 
 # Semantic Configuration (List of texts and corresponding thresholds)
-SEMANTIC_TEXTS = ["life threatening", "gun shooting"]
-SEMANTIC_THRESHOLDS = [0.6, 0.6]
+SEMANTIC_TEXTS = ["life threatening", "gun shooting","physically assaulting"]
+SEMANTIC_THRESHOLDS = [0.6, 0.6,0.6]
 
 # State Machine Constants
 STATE_IDLE = "IDLE"
