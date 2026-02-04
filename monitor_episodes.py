@@ -17,12 +17,14 @@ except ImportError:
     exit(1)
 
 # Configuration
-BLOCKS_DIR = "./Factory-4/blocks"
+BLOCKS_DIR = "./shooting-1/blocks"
 PLAYBACK_SPEED = 0.5
 MODEL_NAME = 'all-MiniLM-L6-v2'
-SIMILARITY_THRESHOLD = 0.8
-LIFE_THREATENING_THRESHOLD = 0.6
 FIFO_SIZE = 10
+
+# Semantic Configuration (List of texts and corresponding thresholds)
+SEMANTIC_TEXTS = ["life threatening", "gun shooting"]
+SEMANTIC_THRESHOLDS = [0.6, 0.6]
 
 # State Machine Constants
 STATE_IDLE = "IDLE"
@@ -30,38 +32,31 @@ STATE_IN_EPISODE = "IN_EPISODE"
 STATE_PENDING_CLOSURE = "PENDING_CLOSURE"
 
 # Thresholds
-START_THRESHOLD = 60.0
-END_THRESHOLD = 40.0
+SIMILARITY_THRESHOLD = 0.8 # For Gap Resilience (similarity to prev episode)
+START_THRESHOLD = 60.0 # Variable Start
+END_THRESHOLD = 40.0   # Variable End
 
 # --- LLM Integration (Placeholder) ---
 def call_gemma_llm(context_data):
     """
-    Summarizes the provided context data using Gemma 3 logic.
-    Accepts the full list of JSON blocks for the episode.
+    Summarizes the provided context data.
     """
     frame_count = len(context_data)
     print(f"\n[System] Generating Summary via Gemma 3 for {frame_count} frames...")
-    return f"Gemma 3 Summary: Episode with {frame_count} frames processed. Triggered by sensor thresholds or semantic risk."
+    return f"Gemma 3 Summary: Episode with {frame_count} frames processed. Triggered by sensor or semantic risk."
 
 # --- Helper Functions ---
 
 def extract_numerical_variables(data, parent_key=''):
-    """
-    Recursively extracts all numerical variables (int, float, or string-numbers)
-    from a dictionary and returns a flattened dict of {path: value}.
-    """
     items = {}
-    
     if isinstance(data, dict):
         for k, v in data.items():
             new_key = f"{parent_key}.{k}" if parent_key else k
             items.update(extract_numerical_variables(v, new_key))
-            
     elif isinstance(data, list):
         for i, v in enumerate(data):
             new_key = f"{parent_key}[{i}]"
             items.update(extract_numerical_variables(v, new_key))
-            
     else:
         if isinstance(data, (int, float)) and not isinstance(data, bool):
              if data <= 100.0:
@@ -73,7 +68,6 @@ def extract_numerical_variables(data, parent_key=''):
                     items[parent_key] = val
             except ValueError:
                 pass
-                
     return items
 
 def get_embedding(model, text):
@@ -82,38 +76,51 @@ def get_embedding(model, text):
     return model.encode(text)
 
 def compute_similarity(emb1, emb2):
-    """Computes cosine similarity between two embeddings."""
     if emb1 is None or emb2 is None:
         return 0.0
     return cosine_similarity(emb1.reshape(1, -1), emb2.reshape(1, -1))[0][0]
 
-def check_new_episode_trigger(max_val, current_embedding, life_threatening_embedding):
+def check_new_episode_trigger(max_val, current_embedding, trigger_embeddings, thresholds):
     """
-    Checks if a new episode should start based on:
-    1. Variable Threshold (max_val > START_THRESHOLD)
-    2. Semantic Similarity to 'life threatening' (sim > LIFE_THREATENING_THRESHOLD)
-    
+    Checks if a new episode should start.
     Returns: (is_triggered, reason_string)
     """
-    # Check 1: Variable Threshold
+    # 1. Variable Trigger
     if max_val > START_THRESHOLD:
         return True, f"High Variable ({max_val:.2f})"
         
-    # Check 2: Life Threatening Semantic
-    lt_sim_score = compute_similarity(current_embedding, life_threatening_embedding)
-    if lt_sim_score > LIFE_THREATENING_THRESHOLD:
-        return True, f"Semantic Threat ({lt_sim_score:.3f})"
+    # 2. Semantic Triggers
+    if not trigger_embeddings or not thresholds:
+        return False, ""
         
+    for i, t_emb in enumerate(trigger_embeddings):
+        sim = compute_similarity(current_embedding, t_emb)
+        if sim > thresholds[i]:
+            title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
+            return True, f"Semantic '{title}' ({sim:.3f})"
+            
+    return False, ""
+
+def check_semantic_hold(current_embedding, trigger_embeddings, thresholds):
+    """
+    Checks if ANY semantic trigger is high enough to HOLD the episode active.
+    Returns: (should_hold, reason_string)
+    """
+    if not trigger_embeddings or not thresholds:
+        return False, ""
+
+    # Check matches
+    for i, t_emb in enumerate(trigger_embeddings):
+        sim = compute_similarity(current_embedding, t_emb)
+        if sim >= thresholds[i]:
+            title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
+            return True, f"Risk: '{title}' ({sim:.3f})"
+            
     return False, ""
 
 def finalize_episode(episode_buffer, reason_suffix="Ended"):
-    """
-    Generates summary for the episode buffer and prints it.
-    Returns empty buffer to reset state.
-    """
     if not episode_buffer:
         return []
-
     print("-" * 40)
     summary = call_gemma_llm(episode_buffer)
     print(f"EPISODE SUMMARY ({reason_suffix}):")
@@ -128,18 +135,21 @@ def main():
     model = SentenceTransformer(MODEL_NAME)
     print("Model loaded.")
 
-    # Pre-compute "life threatening" embedding
-    life_threatening_text = "life threatening"
-    life_threatening_embedding = get_embedding(model, life_threatening_text)
-    print(f"Computed embedding reference for '{life_threatening_text}'")
+    # Pre-compute "trigger" embeddings
+    trigger_embeddings = []
+    print("Computing trigger embeddings:")
+    for i, text in enumerate(SEMANTIC_TEXTS):
+        emb = get_embedding(model, text)
+        trigger_embeddings.append(emb)
+        print(f" - [{i}] '{text}' (Threshold: {SEMANTIC_THRESHOLDS[i]})")
 
     current_state = STATE_IDLE
     episode_buffer = []          
     pending_buffer = []          
     
-    recent_embeddings = deque(maxlen=FIFO_SIZE) 
     last_active_embedding = None 
 
+    # Look for block_*.json 
     search_path = os.path.join(BLOCKS_DIR, "block_*.json")
     files = sorted(glob.glob(search_path))
     
@@ -148,9 +158,13 @@ def main():
         return
 
     print(f"Found {len(files)} blocks to process.")
-    print(f"Monitoring... (Sim > {SIMILARITY_THRESHOLD}, Start > {START_THRESHOLD}, LifeThreat > {LIFE_THREATENING_THRESHOLD})")
+    print("Monitoring...")
 
     for file_path in files:
+        # FILTER: Skip if ends with _state.json
+        if file_path.endswith("_state.json"):
+            continue
+
         try:
             print(f"Processing {os.path.basename(file_path)}...", end='\r')
             
@@ -163,8 +177,7 @@ def main():
             summary_content = data.get('summary', {})
             summary_text = json.dumps(summary_content)
             current_embedding = get_embedding(model, summary_text)
-            recent_embeddings.append(current_embedding)
-
+            
             # 2. Extract Variables
             flat_vars = extract_numerical_variables(summary_content, parent_key='summary')
             max_val = 0.0
@@ -175,20 +188,22 @@ def main():
             # 3. State Machine Logic
             
             if current_state == STATE_IN_EPISODE:
-                # OPTIMIZATION: Skip similarity check
                 episode_buffer.append(data)
                 last_active_embedding = current_embedding 
 
-                # Check Life Threatening for "Hold" condition
-                lt_sim_score = compute_similarity(current_embedding, life_threatening_embedding)
-
-                if max_val < END_THRESHOLD and lt_sim_score < LIFE_THREATENING_THRESHOLD:
-                    print(f"\n[Info] Value dropped ({max_val:.2f}) and Risk low ({lt_sim_score:.3f}). Checking continuity...")
+                # Check "Hold" Conditions (Variable OR Semantic)
+                var_hold = (max_val >= END_THRESHOLD)
+                sem_hold, sem_msg = check_semantic_hold(current_embedding, trigger_embeddings, SEMANTIC_THRESHOLDS)
+                
+                if not var_hold and not sem_hold:
+                    # DROP Condition Met
+                    print(f"\n[Info] Value dropped ({max_val:.2f}) and No Semantic Risk. checking continuity...")
                     current_state = STATE_PENDING_CLOSURE
                     pending_buffer = [] 
                 else:
-                    trigger_msg = f"Var: {max_val:.1f}" if max_val >= END_THRESHOLD else f"Risk: {lt_sim_score:.3f}"
-                    print(f"In Episode... {trigger_msg} (Buffer: {len(episode_buffer)})", end='\r')
+                    # Stay Active
+                    msg = f"Var: {max_val:.1f}" if var_hold else sem_msg
+                    print(f"In Episode... {msg} (Buffer: {len(episode_buffer)})", end='\r')
 
             elif current_state == STATE_PENDING_CLOSURE:
                 pending_buffer.append(data)
@@ -196,8 +211,8 @@ def main():
                 # Check Similarity to Previous Episode
                 sim_score = compute_similarity(current_embedding, last_active_embedding)
                 
-                # Check New Trigger (Var or LifeThreat)
-                is_triggered, trigger_reason = check_new_episode_trigger(max_val, current_embedding, life_threatening_embedding)
+                # Check New Trigger
+                is_triggered, trigger_reason = check_new_episode_trigger(max_val, current_embedding, trigger_embeddings, SEMANTIC_THRESHOLDS)
 
                 if sim_score > SIMILARITY_THRESHOLD:
                     # RESUME
@@ -210,11 +225,8 @@ def main():
                 elif is_triggered:
                     # NEW EPISODE
                     print(f"\n[Info] {trigger_reason} detected during gap. Starting NEW episode.")
-                    
-                    # Finalize Old
                     episode_buffer = finalize_episode(episode_buffer, reason_suffix="Ended")
                     
-                    # Start New
                     episode_buffer = [data]
                     last_active_embedding = current_embedding
                     pending_buffer = []
@@ -230,7 +242,7 @@ def main():
                     current_state = STATE_IDLE
 
             elif current_state == STATE_IDLE:
-                is_triggered, trigger_reason = check_new_episode_trigger(max_val, current_embedding, life_threatening_embedding)
+                is_triggered, trigger_reason = check_new_episode_trigger(max_val, current_embedding, trigger_embeddings, SEMANTIC_THRESHOLDS)
                 
                 if is_triggered:
                     print(f"\n[!!!] EPISODE STARTED in {data['source_file']}") 
@@ -246,7 +258,7 @@ def main():
             print(f"\nError processing {file_path}: {e}")
             traceback.print_exc()
 
-    # End of files check
+    # End
     if current_state in [STATE_IN_EPISODE, STATE_PENDING_CLOSURE]:
          if episode_buffer:
              print(f"\n[!] Script finished. Finalizing remaining episode.")
