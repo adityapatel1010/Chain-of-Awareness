@@ -95,8 +95,11 @@ def check_new_episode_trigger(max_val, current_embedding, trigger_embeddings, th
         
     for i, t_emb in enumerate(trigger_embeddings):
         sim = compute_similarity(current_embedding, t_emb)
+        title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
+        
+        print(f"      [SimCheck] '{title}': {sim:.4f}")
+        
         if sim > thresholds[i]:
-            title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
             return True, f"Semantic '{title}' ({sim:.3f})"
             
     return False, ""
@@ -112,8 +115,11 @@ def check_semantic_hold(current_embedding, trigger_embeddings, thresholds):
     # Check matches
     for i, t_emb in enumerate(trigger_embeddings):
         sim = compute_similarity(current_embedding, t_emb)
+        title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
+        
+        print(f"      [HoldCheck] '{title}': {sim:.4f}")
+        
         if sim >= thresholds[i]:
-            title = SEMANTIC_TEXTS[i] if i < len(SEMANTIC_TEXTS) else f"Trigger {i}"
             return True, f"Risk: '{title}' ({sim:.3f})"
             
     return False, ""
